@@ -3,6 +3,8 @@ package com.DeliveryTracker.DeliveryTracker.entity;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -38,6 +40,11 @@ public class WorkDay {
     @JoinColumn(name = "preset_id")
     private Preset preset;
 
+    @ManyToOne
+    @JoinColumn(name = "user_id", nullable = false)
+    @JsonIgnore // Isso evita que, ao buscar um dia, ele tente trazer o usuário inteiro junto (loop infinito)
+    private User user;
+    
     public BigDecimal getTotalReceivable() {
         return serviceValue.add(
             reimbursementValue != null ? reimbursementValue : BigDecimal.ZERO

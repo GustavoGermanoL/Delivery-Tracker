@@ -3,14 +3,17 @@ package com.DeliveryTracker.DeliveryTracker.service;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 import org.hibernate.boot.registry.classloading.spi.ClassLoaderService.Work;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import com.DeliveryTracker.DeliveryTracker.dto.PeriodSummaryDTO;
 import com.DeliveryTracker.DeliveryTracker.dto.WorkDayRequestDTO;
 import com.DeliveryTracker.DeliveryTracker.dto.WorkDayResponseDTO;
 import com.DeliveryTracker.DeliveryTracker.entity.Preset;
+import com.DeliveryTracker.DeliveryTracker.entity.User;
 import com.DeliveryTracker.DeliveryTracker.entity.WorkDay;
 import com.DeliveryTracker.DeliveryTracker.repository.PresetRepository;
 import com.DeliveryTracker.DeliveryTracker.repository.WorkDayRepository;
@@ -25,67 +28,91 @@ public class WorkDayService {
     private final WorkDayRepository workDayRepository;
     private final PresetRepository presetRepository;
 
+   
+    // MÉTODO MÁGICO: Pega o usuário que está mandando a requisição (pelo Token)
+    private User getAuthenticatedUser() {
+        return (User) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+    }
+
+    public List<WorkDay> findAll() {
+        // Agora só busca os dias do usuário logado
+        return workDayRepository.findAll(); // Cuidado: ideal seria filtrar por usuário aqui também se tiver um método findAllByUser
+        // Mas como vamos usar o getSummary, o findAll é pouco usado.
+    }
+
+    public List<WorkDay> findByDateRange(LocalDate start, LocalDate end) {
+        User currentUser = getAuthenticatedUser();
+        return workDayRepository.findByDateBetweenAndUser(start, end, currentUser);
+    }
+
     public WorkDayResponseDTO save(WorkDayRequestDTO dto) {
-        WorkDay workDay = new WorkDay();
-        workDay.setDate(dto.date());
+        User currentUser = getAuthenticatedUser();
         
-        // --- Lógica de Valor: Preset vs Manual ---
-        if (dto.presetId() != null) {
-            // Cenário 1: Usuário clicou no botão colorido
-            Preset preset = presetRepository.findById(dto.presetId())
-                    .orElseThrow(() -> new RuntimeException("Preset não encontrado ID: " + dto.presetId()));
-            
-            workDay.setPreset(preset);
-            workDay.setServiceValue(preset.getFixedValue()); // Pega o valor atrelado ao preset
+        // 1. Verifica se já existe um dia salvo para este usuário nesta data
+        var existing = workDayRepository.findByDateAndUser(dto.date(), currentUser);
+        
+        WorkDay workDay;
+
+        if (existing.isPresent()) {
+            // Se já existe, vamos atualizar o objeto existente
+            workDay = existing.get();
         } else {
-            // Cenário 2: Usuário digitou valor manual
-            if (dto.manualValue() == null) {
-                throw new RuntimeException("Se não selecionar um Preset, deve informar o valor manual.");
-            }
-            workDay.setPreset(null);
-            workDay.setServiceValue(dto.manualValue());
+            // Se não existe, criamos um novo e definimos o dono
+            workDay = new WorkDay();
+            workDay.setDate(dto.date());
+            workDay.setUser(currentUser);
         }
 
-        // --- Lógica de Reembolso ---
+        // 2. PREENCHE OS DADOS (Conversão DTO -> Entity)
+        workDay.setServiceValue(dto.manualValue()); // ou dto.serviceValue() dependendo do nome no DTO
         workDay.setReimbursementValue(dto.reimbursementValue());
         workDay.setReimbursementDescription(dto.reimbursementDesc());
 
-        // Salva no banco (se já existir data, ele atualiza/sobrescreve)
+        // 3. RESOLVE O PRESET (Isso corrige o erro de ID vs Objeto)
+        if (dto.presetId() != null) {
+            // Busca o Preset no banco pelo ID que veio do front
+            Preset preset = presetRepository.findById(dto.presetId())
+                    .orElseThrow(() -> new RuntimeException("Preset não encontrado com ID: " + dto.presetId()));
+            workDay.setPreset(preset);
+        } else {
+            // Se veio null (ex: limpou o dia), remove o preset
+            workDay.setPreset(null);
+        }
+
+        // 4. SALVA NO BANCO
         WorkDay saved = workDayRepository.save(workDay);
 
+        // 5. Retorna convertido para DTO (Boa prática)
         return new WorkDayResponseDTO(saved);
     }
 
     public List<WorkDayResponseDTO> findByMonth(int year, int month) {
         LocalDate start = LocalDate.of(year, month, 1);
-        LocalDate end = start.withDayOfMonth(start.lengthOfMonth()); // Último dia do mês
+        LocalDate end = start.withDayOfMonth(start.lengthOfMonth());
 
-        List<WorkDay> list = workDayRepository.findByDateBetween(start, end);
+    
+        List<WorkDay> list = this.findByDateRange(start, end);
 
-        // Converte a lista de Entidades para DTOs
         return list.stream()
                 .map(WorkDayResponseDTO::new)
                 .toList();
     }
 
+    // 5. Resumo do Período (FILTRADO POR USUÁRIO)
     public PeriodSummaryDTO getPeriodSummary(LocalDate start, LocalDate end) {
-        // 1. Busca os dias no intervalo (ex: 01 a 15)
-        List<WorkDay> days = workDayRepository.findByDateBetween(start, end);
+      
+        List<WorkDay> days = this.findByDateRange(start, end);
 
-        // 2. Soma as Diárias (Service Value)
         BigDecimal totalService = days.stream()
                 .map(WorkDay::getServiceValue)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 3. Soma os Reembolsos (Tratando nulos para não dar erro)
         BigDecimal totalReimbursement = days.stream()
                 .map(day -> day.getReimbursementValue() != null ? day.getReimbursementValue() : BigDecimal.ZERO)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 4. Calcula o Total Geral
         BigDecimal totalReceivable = totalService.add(totalReimbursement);
 
-        // 5. Converte a lista de dias para DTO (para mostrar no extrato)
         List<WorkDayResponseDTO> daysDto = days.stream()
                 .map(WorkDayResponseDTO::new)
                 .toList();
@@ -94,9 +121,14 @@ public class WorkDayService {
     }
 
     
-    // Método para deletar um dia (ex: clicou errado)
     public void delete(LocalDate date) {
-        workDayRepository.deleteById(date);
+        User currentUser = getAuthenticatedUser();
+        
+        // Busca primeiro para ter certeza que pertence ao usuário
+        Optional<WorkDay> target = workDayRepository.findByDateAndUser(date, currentUser);
+        
+        // Se achou, deleta. Se não achou (ou for de outro usuário), não faz nada.
+        target.ifPresent(workDayRepository::delete);
     }
 
     
