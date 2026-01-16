@@ -2,10 +2,11 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { PeriodSummary } from '../models/work-day.model';
+import { environment } from '../../enviroments/environment';
 
 @Injectable({ providedIn: 'root' })
 export class WorkDayService {
-  private apiUrl = 'http://localhost:8080/api/work-days';
+  private apiUrl = `${environment.apiUrl}/api/work-days`;
 
   constructor(private http: HttpClient) { }
 
